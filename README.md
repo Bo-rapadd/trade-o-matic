@@ -1,16 +1,14 @@
 # trade-o-matic
 
-A research-first quantitative trading platform.
+A research-first quantitative trading platform with a command-line strategy test bench.
 
-The project is designed around a strict separation between research, portfolio/risk decisions, and execution. Strategies generate signals; they never talk directly to a broker. This allows the same research code to be used for historical backtests, paper trading, and eventually live trading through interchangeable broker adapters.
+## What is runnable now
 
-## Current milestone
+The daily research path is:
 
-The repository now has an end-to-end **daily research path**:
+`CSV/Parquet -> Strategy -> Signal -> target weights -> risk -> NEXT-BAR OPEN fills -> Ledger -> cost-adjusted equity -> metrics`
 
-`CSV/Parquet bars -> Strategy -> delayed target portfolio -> simulated next-open fills -> Ledger -> cost-adjusted equity -> metrics`
-
-A close-derived signal is structurally unable to execute until the following bar's open. Spread, slippage and commission are explicit assumptions rather than deductions made after the backtest.
+A close-derived signal cannot execute until the following bar's open. Spread, slippage and commission are explicit. The same strategy API is intended to feed paper/live execution later through broker adapters.
 
 ## Install
 
@@ -18,62 +16,79 @@ A close-derived signal is structurally unable to execute until the following bar
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
+pytest
 trade-o-matic doctor
+trade-o-matic strategies
 ```
 
-## Market data format
+## Data
 
-CSV and Parquet inputs use one row per symbol/bar:
+CSV/Parquet columns:
 
 ```text
 symbol,timestamp,open,high,low,close,volume
 SPY,2025-01-02T00:00:00Z,586.08,589.64,582.44,584.64,50204000
 ```
 
-Duplicate symbol/timestamp observations and invalid OHLC bars are rejected. Local files make research runs reproducible; vendor adapters will be added separately.
+Use adjusted/clean research data consistently. Duplicate symbol/timestamp observations and invalid OHLC bars are rejected. Corporate-action/survivorship-safe vendor ingestion is a separate upcoming milestone.
 
-## Run a backtest
+## Built-in test strategies
+
+- `tsmom` — time-series momentum
+- `ma_cross` — moving-average crossover
+- `mean_reversion` — rolling price z-score mean reversion
+- `donchian` — Donchian breakout
+
+These are baseline/test strategies, not claims of profitable edges.
+
+## Backtest any registered strategy
 
 ```bash
 trade-o-matic backtest \
-  --data data/daily.csv \
-  --symbols SPY,QQQ \
-  --start 2010-01-01 \
-  --end 2025-12-31 \
-  --strategy tsmom \
-  --lookback 252 \
-  --capital 100000 \
-  --half-spread-bps 1 \
-  --slippage-bps 1 \
-  --commission-bps 0
+  --data data/daily.csv --symbols SPY,QQQ \
+  --start 2010-01-01 --end 2025-12-31 \
+  --strategy ma_cross --param fast=50 --param slow=200 \
+  --capital 100000 --half-spread-bps 1 --slippage-bps 1 \
+  --json results/ma_cross.json
 ```
 
-The report includes final equity, total return, CAGR, volatility, Sharpe, Sortino, maximum drawdown, fills, turnover and modeled trading costs.
+Parameters are strategy-specific and repeatable with `--param KEY=VALUE`. `trade-o-matic strategies` lists accepted parameters.
+
+## Basic out-of-sample validation
+
+```bash
+trade-o-matic validate \
+  --data data/daily.csv --symbols SPY,QQQ \
+  --start 2010-01-01 --end 2025-12-31 \
+  --strategy tsmom --param lookback=252 \
+  --train-fraction 0.70 --cost-stress 3
+```
+
+This runs a chronological 70/30 split and repeats the untouched OOS segment with transaction costs multiplied by three. `PASS` is deliberately only a basic screening flag; it is not evidence that a strategy is production-ready.
+
+## Adding a strategy
+
+Implement `Strategy.generate(history, as_of) -> list[Signal]`, put it under `src/trade_o_matic/strategies/`, and register its factory and accepted parameters in `registry.py`. Strategies cannot place orders or import broker SDKs.
 
 ## Architecture rules
 
-- Strategies emit `Signal` objects and cannot execute orders.
-- Market data is behind `MarketDataSource`.
-- Paper/live execution will be behind `Broker`; backtests never import broker SDKs.
-- Portfolio risk is applied outside strategies.
-- Decisions based on bar T execute no earlier than bar T+1.
-- Every research run must declare transaction-cost assumptions.
-- Failed research is retained; future alpha experiments will be registered rather than selectively discarded.
+- strategies emit signals only;
+- market data is behind `MarketDataSource`;
+- broker execution is behind `Broker` and is absent from backtests;
+- risk is portfolio-level and outside strategies;
+- bar T information executes no earlier than T+1;
+- transaction-cost assumptions are mandatory and visible;
+- tests explicitly check future bars cannot alter an as-of signal.
 
-## Initial goals
+## Known limitations before live/paper trading
 
-- reproducible quantitative research from the command line
-- explicit transaction costs and execution assumptions
-- deterministic accounting with an auditable ledger
-- portfolio-level risk controls
-- vendor-neutral market-data and broker interfaces
-- paper/live execution without rewriting strategies
-- equities first, with futures, crypto, and prediction markets later
+The current runner is a daily research simulator. It does not yet model partial fills, limit-order queues, halts, borrow availability/fees, dividends, taxes, exchange fees, corporate actions, delistings, survivorship-safe universes, or intraday microstructure. Those limitations must not be ignored when interpreting results.
 
-## Next
+## Next research milestones
 
-1. Add downloadable/versioned equity data snapshots and corporate-action handling.
-2. Add research-run persistence and an alpha registry.
-3. Add cross-sectional portfolio construction and initial Alpha101 signals.
-4. Add walk-forward/OOS/cost-stress validation.
-5. Only after validation, add paper broker adapters and intraday strategies.
+1. versioned/survivorship-safe equity datasets and corporate actions;
+2. persistent experiment registry and result comparison;
+3. walk-forward and parameter-stability validation;
+4. cross-sectional portfolio construction + Alpha101 subset;
+5. paper broker adapter and daily trade proposal/email workflow;
+6. separate event-driven intraday simulator for ORB/SPY-intraday strategies.
