@@ -11,6 +11,7 @@ from .domain import Bar
 from .interfaces import MarketDataSource
 
 _REQUIRED = {"symbol", "timestamp", "open", "high", "low", "close", "volume"}
+_SUPPORTED = {"1s", "1m", "2m", "5m", "15m", "30m", "60m", "1h", "1d", "1day", "daily"}
 
 
 def _to_utc(value: object) -> datetime:
@@ -24,11 +25,7 @@ def _to_utc(value: object) -> datetime:
 
 @dataclass(slots=True)
 class LocalBarDataSource(MarketDataSource):
-    """Reproducible local OHLCV source backed by CSV or Parquet.
-
-    Data is normalized to UTC and validated for duplicate symbol/timestamp rows,
-    chronological ordering, and OHLC consistency through the domain model.
-    """
+    """Reproducible local OHLCV source backed by CSV or Parquet."""
 
     path: Path
 
@@ -45,11 +42,10 @@ class LocalBarDataSource(MarketDataSource):
             frame = pd.read_parquet(self.path)
         else:
             raise ValueError("market data must be CSV or Parquet")
-
         missing = _REQUIRED - set(frame.columns)
         if missing:
             raise ValueError(f"market data missing columns: {sorted(missing)}")
-        frame = frame[list(_REQUIRED)].copy()
+        frame = frame[["symbol", "timestamp", "open", "high", "low", "close", "volume"]].copy()
         frame["symbol"] = frame["symbol"].astype(str).str.upper().str.strip()
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         if frame[["symbol", "timestamp"]].duplicated().any():
@@ -60,42 +56,25 @@ class LocalBarDataSource(MarketDataSource):
 
     @staticmethod
     def _rows_to_bars(frame: pd.DataFrame) -> list[Bar]:
-        return [
-            Bar(
-                symbol=row.symbol,
-                timestamp=_to_utc(row.timestamp),
-                open=float(row.open),
-                high=float(row.high),
-                low=float(row.low),
-                close=float(row.close),
-                volume=float(row.volume),
-            )
-            for row in frame.itertuples(index=False)
-        ]
+        return [Bar(row.symbol, _to_utc(row.timestamp), float(row.open), float(row.high),
+                    float(row.low), float(row.close), float(row.volume))
+                for row in frame.itertuples(index=False)]
 
-    def bars(
-        self,
-        symbols: Sequence[str],
-        start: datetime,
-        end: datetime,
-        timeframe: str,
-    ) -> list[Bar]:
-        if timeframe not in {"1d", "1day", "daily"}:
-            raise ValueError("LocalBarDataSource currently supports daily bars only")
+    def bars(self, symbols: Sequence[str], start: datetime, end: datetime, timeframe: str) -> list[Bar]:
+        if timeframe not in _SUPPORTED:
+            raise ValueError(f"unsupported timeframe: {timeframe}")
         start_utc = start.astimezone(timezone.utc) if start.tzinfo else start.replace(tzinfo=timezone.utc)
         end_utc = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
         wanted = {symbol.upper() for symbol in symbols}
         frame = self._frame()
-        mask = (
-            frame["symbol"].isin(wanted)
-            & (frame["timestamp"] >= pd.Timestamp(start_utc))
-            & (frame["timestamp"] <= pd.Timestamp(end_utc))
-        )
+        mask = (frame["symbol"].isin(wanted) &
+                (frame["timestamp"] >= pd.Timestamp(start_utc)) &
+                (frame["timestamp"] <= pd.Timestamp(end_utc)))
         return self._rows_to_bars(frame.loc[mask])
 
     def latest(self, symbols: Sequence[str], timeframe: str) -> list[Bar]:
-        if timeframe not in {"1d", "1day", "daily"}:
-            raise ValueError("LocalBarDataSource currently supports daily bars only")
+        if timeframe not in _SUPPORTED:
+            raise ValueError(f"unsupported timeframe: {timeframe}")
         wanted = {symbol.upper() for symbol in symbols}
         frame = self._frame()
         frame = frame[frame["symbol"].isin(wanted)]
